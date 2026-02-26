@@ -1,0 +1,52 @@
+{
+  "version": "3.0",
+  "data": {
+    "turns_path": "~/.claude/continual-learning/data/turns.jsonl",
+    "max_file_size_mb": 10,
+    "archive_after_days": 30
+  },
+  "tool_recording": {
+    "default": {
+      "input": "target_only",
+      "target_fields": ["file_path", "pattern", "url"],
+      "output": "none"
+    },
+    "overrides": {
+      "Grep":      {"input": "detailed", "fields": ["pattern", "path", "glob", "type"]},
+      "Bash":      {"input": "detailed", "fields": ["command"], "output": "truncated", "output_max": 500},
+      "WebSearch": {"input": "detailed", "fields": ["query"]},
+      "WebFetch":  {"input": "detailed", "fields": ["url", "prompt"]},
+      "Task":      {"input": "delegate", "fields": ["subagent_type", "prompt"]},
+      "Skill":     {"input": "skill", "fields": ["skill", "args"]}
+    },
+    "ignore": ["TodoWrite", "TodoRead"]
+  },
+  "observer": {
+    "interval_seconds": 600,
+    "model_episode": "haiku",
+    "model_pattern": "sonnet",
+    "model_bash_pattern": "sonnet",
+    "min_turns_to_analyze": 14,
+    "min_episodes_for_patterns": 3,
+    "min_bash_events": 10
+  },
+  "instincts": {
+    "min_confidence": 0.3,
+    "auto_apply_threshold": 0.7,
+    "min_observations": 3,
+    "confidence_decay_per_week": 0.02,
+    "max_instincts": 100
+  },
+  "bash_intercept": {
+    "enabled": true,
+    "block_threshold": 0.7,
+    "warn_threshold": 0.5,
+    "cooldown_seconds": 5
+  },
+  "materialization": {
+    "rule_threshold": 0.7,
+    "rule_output": "~/.claude/rules/learned.md",
+    "prompt_template_dir": "~/.claude/continual-learning/prompts/",
+    "auto_materialize": false
+  }
+}
