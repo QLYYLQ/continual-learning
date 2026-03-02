@@ -156,10 +156,14 @@ except OSError:
 
 if current_size >= max_size:
     # Rotate: move current file to archive
+    # Use try/except to handle race condition when multiple hooks trigger simultaneously
     archive_dir = os.path.join(os.path.dirname(jsonl_path), "turns.archive")
     os.makedirs(archive_dir, exist_ok=True)
     archive_name = datetime.now().strftime("%Y%m%d-%H%M%S") + ".jsonl"
-    os.rename(jsonl_path, os.path.join(archive_dir, archive_name))
+    try:
+        os.rename(jsonl_path, os.path.join(archive_dir, archive_name))
+    except OSError:
+        pass  # Another hook already rotated the file
 
 with open(jsonl_path, "a") as f:
     f.write(line)

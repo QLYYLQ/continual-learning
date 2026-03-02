@@ -2,288 +2,207 @@
 """
 Continuous Learning v3 - Bash Context Extractor (Stage 3b pre-processing)
 
-Pure Python, no LLM. Extracts bash command context elements from turns.jsonl
-into a JSONL file. Each element is a self-contained context window around a
-bash call, suitable for LLM analysis.
+Task-driven mode: extracts bash command contexts only for dirty tasks,
+with enriched trajectory context (what the user was doing before/after
+each bash call).
 
-Context window per element:
-  - 2 events before the bash call (the "why")
-  - The bash call itself (e:"tool", tool:"Bash")
-  - Feedback: the next bash_ok or fail event for Bash
-  - 1 event after feedback (catches corrections, pivots)
-
-Input:  data/turns.jsonl + data/.stage3b_processed (state)
-Output: data/.stage3b_contexts.jsonl
+Input:  task_registry.json + data/sessions/{sid}.json files
+Output: data/.stage3b_task_contexts.json
 
 Usage:
-  # Extract contexts (only new/changed sessions)
-  python3 extract_bash_contexts.py --input data/turns.jsonl \
-      --state data/.stage3b_processed --output data/.stage3b_contexts.jsonl
-
-  # Mark all sessions as processed
-  python3 extract_bash_contexts.py --input data/turns.jsonl \
-      --state data/.stage3b_processed --mark-done
+  # Task-driven extraction (normal mode)
+  python3 extract_bash_contexts.py --task-registry data/task_registry.json \
+      --sessions-dir data/sessions --output data/.stage3b_task_contexts.json
 """
 
 import argparse
 import json
 import sys
-from collections import defaultdict
-from datetime import datetime, timezone
 from pathlib import Path
 
 
-def parse_jsonl(path: str) -> list[dict]:
-    """Read JSONL file, skip malformed lines."""
-    events = []
-    with open(path, "r") as f:
-        for line_num, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                evt = json.loads(line)
-                if evt.get("v") == 3:
-                    events.append(evt)
-            except json.JSONDecodeError:
-                print(
-                    f"Warning: skipping malformed line {line_num}",
-                    file=sys.stderr,
-                )
-    return events
-
-
-def group_by_session(events: list[dict]) -> dict[str, list[dict]]:
-    """Group events by session_id, preserving order."""
-    sessions: dict[str, list[dict]] = defaultdict(list)
-    for evt in events:
-        sid = evt.get("sid", "unknown")
-        sessions[sid].append(evt)
-    return dict(sessions)
-
-
-def load_state(state_path: str) -> dict:
-    """Load processed state: {session_id: {event_count, analyzed_at}}."""
+def load_json(path: str, default: dict | None = None) -> dict:
+    """Load JSON file, return default if missing or malformed."""
     try:
-        with open(state_path, "r") as f:
-            data = json.load(f)
-        if isinstance(data, dict) and "processed_sessions" in data:
-            return data["processed_sessions"]
+        with open(path, "r") as f:
+            return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        pass
-    return {}
+        return default if default is not None else {}
 
 
-def save_state(state_path: str, sessions: dict[str, list[dict]]) -> None:
-    """Save processed state with event counts per session."""
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    processed = {}
-    for sid, events in sessions.items():
-        processed[sid] = {
-            "event_count": len(events),
-            "analyzed_at": now,
-        }
-    state = {"processed_sessions": processed}
-    with open(state_path, "w") as f:
-        json.dump(state, f, indent=2, ensure_ascii=False)
+def load_session(sessions_dir: str, sid: str) -> dict | None:
+    """Load a session file by SID."""
+    path = Path(sessions_dir) / f"{sid}.json"
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
 
 
-def is_bash_tool_call(evt: dict) -> bool:
-    """Check if event is a Bash tool call."""
-    return evt.get("e") == "tool" and evt.get("tool") == "Bash"
+def get_fragment_turns(session: dict, turn_range: list[int]) -> list[dict]:
+    """Get turns within the specified range."""
+    turns = session.get("turns", [])
+    if len(turn_range) != 2:
+        return turns
+    start_idx, end_idx = turn_range
+    return [t for t in turns if start_idx <= t.get("turn_idx", -1) <= end_idx]
 
 
-def is_bash_feedback(evt: dict) -> bool:
-    """Check if event is bash feedback (bash_ok or fail for Bash)."""
-    e_type = evt.get("e")
-    if e_type == "bash_ok":
-        return True
-    if e_type == "fail" and evt.get("tool") == "Bash":
-        return True
-    return False
+def turn_summary(turn: dict) -> dict:
+    """Create a compact summary of a turn for trajectory context."""
+    return {
+        "turn_idx": turn.get("turn_idx", -1),
+        "prompt_preview": turn.get("prompt", "")[:100],
+        "tools": turn.get("tools", {}),
+    }
 
 
-def slim_event(evt: dict) -> dict:
-    """Create a slim copy of an event for context output.
+def find_bash_events_in_session(session: dict) -> list[dict]:
+    """Find all raw events that are bash tool calls in a session.
 
-    Keeps essential fields, drops v (version) to save space.
-    Truncates long string values.
+    Returns list of dicts with event info and the session's raw event list index.
+    We reconstruct from turns since we don't have raw events in session files.
     """
-    slim = {}
-    max_str_len = 500
-
-    for key, val in evt.items():
-        if key == "v":
-            continue
-        if isinstance(val, str) and len(val) > max_str_len:
-            slim[key] = val[:max_str_len] + "..."
-        else:
-            slim[key] = val
-    return slim
+    # In the new format, turns have bash_commands list but not individual events.
+    # We can identify bash activity from turns that have Bash in their tools dict.
+    return []
 
 
-def extract_contexts(session_events: list[dict]) -> list[dict]:
-    """Extract bash context elements from a session's events.
+def extract_task_bash_contexts(task: dict, sessions_dir: str) -> list[dict]:
+    """Extract bash contexts for a single task from its fragments.
 
-    For each Bash tool call, captures:
-      - context_before: up to 2 preceding events
-      - bash_call: the Bash tool event
-      - feedback: the next bash_ok or fail event
-      - context_after: up to 1 event after feedback
+    For each turn that contains bash commands, build enriched context with
+    trajectory before/after.
     """
-    contexts = []
-    idx = 0
+    fragments = task.get("fragments", [])
+    contexts: list[dict] = []
 
-    for i, evt in enumerate(session_events):
-        if not is_bash_tool_call(evt):
+    # Build full turn list across fragments
+    all_turns: list[dict] = []
+    for fragment in fragments:
+        sid = fragment.get("sid", "")
+        turn_range = fragment.get("turn_range", [])
+        session = load_session(sessions_dir, sid)
+        if session is None:
+            continue
+        turns = get_fragment_turns(session, turn_range)
+        for turn in turns:
+            all_turns.append({**turn, "_sid": sid})
+
+    # For each turn with bash commands, extract context
+    for i, turn in enumerate(all_turns):
+        bash_cmds = turn.get("bash_commands", [])
+        has_bash = turn.get("tools", {}).get("Bash", 0) > 0
+        if not bash_cmds and not has_bash:
             continue
 
-        # Context before: up to 2 preceding events
-        context_before = []
+        sid = turn.get("_sid", "")
+        fail_count = turn.get("fail_count", 0)
+
+        # Trajectory before: 1-2 preceding turns
+        traj_before = []
         start = max(0, i - 2)
         for j in range(start, i):
-            context_before.append(slim_event(session_events[j]))
+            traj_before.append(turn_summary(all_turns[j]))
 
-        # The bash call itself
-        bash_call = slim_event(evt)
+        # Trajectory after: 1 following turn
+        traj_after = []
+        if i + 1 < len(all_turns):
+            traj_after.append(turn_summary(all_turns[i + 1]))
 
-        # Find feedback: next bash_ok or fail event after this bash call
-        feedback = None
-        feedback_idx = None
-        for j in range(i + 1, len(session_events)):
-            if is_bash_feedback(session_events[j]):
-                feedback = slim_event(session_events[j])
-                feedback_idx = j
-                break
-            # Stop searching if we hit another tool call without feedback
-            if session_events[j].get("e") == "tool":
-                break
+        # Build bash call info from available data
+        for cmd_idx, cmd in enumerate(bash_cmds):
+            bash_call = {
+                "command": cmd,
+                "ts": turn.get("ts", ""),
+            }
 
-        # Context after: 1 event after feedback
-        context_after = []
-        if feedback_idx is not None:
-            after_start = feedback_idx + 1
-            if after_start < len(session_events):
-                context_after.append(slim_event(session_events[after_start]))
+            # Determine failure status
+            has_failure = fail_count > 0
 
-        # Determine failure and correction candidate status
-        has_failure = (
-            feedback is not None and feedback.get("e") == "fail"
-        )
-
-        correction_candidate = False
-        if has_failure:
-            correction_candidate = True
-        elif context_after:
-            # If the next event after feedback is a different Bash command
-            after_evt = context_after[0]
-            if (
-                after_evt.get("e") == "tool"
-                and after_evt.get("tool") == "Bash"
-            ):
-                after_cmd = after_evt.get("command", "")
-                bash_cmd = evt.get("command", "")
-                if after_cmd != bash_cmd:
+            # Correction candidate: if the next turn also has bash commands
+            # (different commands = implicit correction)
+            correction_candidate = False
+            if has_failure:
+                correction_candidate = True
+            elif i + 1 < len(all_turns):
+                next_bash = all_turns[i + 1].get("bash_commands", [])
+                if next_bash and next_bash != bash_cmds:
                     correction_candidate = True
 
-        context = {
-            "idx": idx,
-            "context_before": context_before,
-            "bash_call": bash_call,
-            "feedback": feedback,
-            "context_after": context_after,
-            "has_failure": has_failure,
-            "correction_candidate": correction_candidate,
-        }
-
-        contexts.append(context)
-        idx += 1
+            context = {
+                "sid": sid,
+                "turn_idx": turn.get("turn_idx", -1),
+                "trajectory_before": traj_before,
+                "bash_call": bash_call,
+                "feedback": {
+                    "type": "fail" if has_failure else "bash_ok",
+                    "output_preview": "",
+                },
+                "trajectory_after": traj_after,
+                "has_failure": has_failure,
+                "correction_candidate": correction_candidate,
+            }
+            contexts.append(context)
 
     return contexts
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="CL v3 Bash Context Extractor (Stage 3b)"
+        description="CL v3 Bash Context Extractor (Stage 3b, task-driven)"
     )
     parser.add_argument(
-        "--input",
-        required=True,
-        help="Path to turns.jsonl",
+        "--task-registry", required=True,
+        help="Path to task_registry.json",
     )
     parser.add_argument(
-        "--state",
-        required=True,
-        help="Path to .stage3b_processed state file",
+        "--sessions-dir", required=True,
+        help="Path to sessions directory",
     )
     parser.add_argument(
-        "--output",
-        help="Path to output JSONL file (required unless --mark-done)",
-    )
-    parser.add_argument(
-        "--mark-done",
-        action="store_true",
-        help="Update state file to mark all sessions as processed",
+        "--output", required=True,
+        help="Path to output JSON file",
     )
     args = parser.parse_args()
 
-    # Parse all events
-    events = parse_jsonl(args.input)
-    if not events:
-        if args.output:
-            Path(args.output).write_text("")
-        print("No events found", file=sys.stderr)
+    registry = load_json(args.task_registry)
+    dirty_ids = registry.get("dirty_task_ids", [])
+    tasks = registry.get("tasks", {})
+
+    if not dirty_ids:
+        # Write empty output
+        with open(args.output, "w") as f:
+            json.dump({"tasks": []}, f)
+        print("bash_context_count=0")
         return
 
-    sessions = group_by_session(events)
-
-    if args.mark_done:
-        save_state(args.state, sessions)
-        total = sum(len(evts) for evts in sessions.values())
-        print(
-            f"Marked {len(sessions)} sessions ({total} events) as processed",
-            file=sys.stderr,
-        )
-        return
-
-    if not args.output:
-        print("--output is required unless --mark-done is used", file=sys.stderr)
-        sys.exit(1)
-
-    # Load state to find new/changed sessions
-    processed = load_state(args.state)
-
-    # Find sessions that need processing
-    new_sessions = {}
-    for sid, session_events in sessions.items():
-        prev = processed.get(sid)
-        if prev is None:
-            # Never processed
-            new_sessions[sid] = session_events
-        elif len(session_events) > prev.get("event_count", 0):
-            # Session has grown since last processing
-            new_sessions[sid] = session_events
-
-    if not new_sessions:
-        Path(args.output).write_text("")
-        print("No new sessions to process", file=sys.stderr)
-        return
-
-    # Extract bash contexts from new sessions
+    result_tasks = []
     total_contexts = 0
-    with open(args.output, "w") as f:
-        for sid, session_events in new_sessions.items():
-            contexts = extract_contexts(session_events)
-            for ctx in contexts:
-                ctx["sid"] = sid
-                f.write(json.dumps(ctx, ensure_ascii=False) + "\n")
-                total_contexts += 1
 
-    print(
-        f"Extracted {total_contexts} bash contexts from "
-        f"{len(new_sessions)} sessions",
-        file=sys.stderr,
-    )
+    for task_id in dirty_ids:
+        task = tasks.get(task_id)
+        if task is None:
+            continue
+
+        contexts = extract_task_bash_contexts(task, args.sessions_dir)
+        if not contexts:
+            continue
+
+        total_contexts += len(contexts)
+        result_tasks.append({
+            "task_id": task_id,
+            "name": task.get("name", ""),
+            "task_type": task.get("task_type", ""),
+            "bash_contexts": contexts,
+        })
+
+    output = {"tasks": result_tasks}
+    with open(args.output, "w") as f:
+        json.dump(output, f, indent=2, ensure_ascii=False)
+
+    print(f"bash_context_count={total_contexts}")
 
 
 if __name__ == "__main__":

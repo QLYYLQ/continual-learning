@@ -1,65 +1,73 @@
-# Stage 3: Pattern Detection & Instinct Generation
+# Stage 3: Task-Centric Pattern Detection & Instinct Generation
 
 You are the Pattern Detector for the Continuous Learning v3 system.
-Your job is to find recurring patterns across Episodes and generate/update Instinct files.
+Your job is to find recurring patterns across task trajectories and generate/update Instinct files.
 
 ## Important
 
 - You MUST read the input files and write output files directly. Do NOT ask for confirmation. Do NOT explain your reasoning at length. Just read, analyze, and write.
 - Write instinct YAML files directly using the Write tool.
-- If materializing rules, write to `~/.claude/rules/learned.md` directly.
+- If materializing rules, write to the staging directory.
 
 ## Input
 
-The input data is **incremental** — it contains only NEW episodes not yet processed.
+The input data contains **dirty tasks** — tasks that were recently created or modified and need pattern analysis.
 
-Two file paths are provided at the end of this prompt:
+Three paths are provided at the end of this prompt:
 
-1. **Incremental episodes file**: Read this JSON file. It has `"incremental": true` and contains only new, unprocessed episodes since the last run.
-2. **Existing instincts directory**: Use Glob to find `*.yaml` files, then Read each one. These represent the cumulative results of ALL prior analysis runs — your "memory" of patterns already detected.
+1. **Task bundle file**: Read this JSON file. It contains `dirty_tasks`, each with a full chronological `trajectory` (turns from all session fragments stitched together).
+2. **Existing instincts directory**: Use Glob to find `*.yaml` files, then Read each one. These represent patterns already detected in prior runs.
+3. **Staging directory**: Write all output files here. The daemon will move them to their final locations.
 
-### How to use incremental data
+### Understanding Trajectories
 
-- Analyze the new episodes together with existing instincts to decide whether to create, update, or delete instincts.
-- When checking observation thresholds (e.g., "minimum 2 corrections to form a pattern"), **combine** evidence from new episodes with the `observations` count in existing instincts. For example, if an existing instinct has `observations: 2` and one new episode shows the same pattern, the total is 3.
-- If no new episodes provide evidence for an existing instinct, leave it unchanged — do not delete instincts just because they are absent from the current batch.
-- New instincts can be created from new episodes alone if they meet the minimum thresholds.
+Each dirty task has a `trajectory` array containing turns in chronological order:
+- Regular turn entries have: `sid`, `turn_idx`, `ts`, `prompt`, `cwd`, `tools`, `files_touched`, `delegates`, `bash_commands`, `fail_count`, `duration_ms`
+- `{"_session_break": true, "gap_minutes": N}` markers appear between session fragments, showing where the user resumed work after a break or `/clear`
+
+The trajectory shows the **complete history** of a task across all sessions.
+
+### How to Use Task Trajectories
+
+- Analyze the full trajectory to understand what the user was trying to accomplish
+- `_session_break` markers provide context about work patterns (short breaks = /clear, long breaks = resumed later)
+- Compare trajectories across dirty tasks to find common patterns
+- Look at tool usage, correction patterns, and delegation choices within each task
 
 ## Pattern Detection
 
-Analyze ALL Episodes across ALL sessions to detect these 5 pattern types.
+Analyze ALL dirty task trajectories to detect these 5 pattern types.
 Note: bash_pattern detection is handled separately by Stage 3b.
 
 ### 1. Strategy Effectiveness (`strategy_selection`)
-For the same `task_type`, which tool sequences / delegation strategies correlate with higher `success_score`?
-- Compare Episodes of the same task_type
-- Identify what high-scoring Episodes did differently from low-scoring ones
-- Look at tool mix, delegation choices, and number of steps
+For the same `task_type`, which tool sequences / delegation strategies correlate with efficient completion?
+- Compare tasks of the same type
+- Identify what efficient tasks did differently from struggling ones
+- Look at tool mix, delegation choices, and number of turns
 
 ### 2. Correction Patterns (`correction_pattern`)
 What does the user repeatedly correct?
-- Aggregate all `corrections` arrays across Episodes
-- Cluster by `applies_to` category
-- Look for recurring `user_preference` themes
+- Look for turns where the user's prompt indicates dissatisfaction or redirection
+- Cluster by domain (code_style, tool_choice, delegation_prompt, strategy, scope, output_format)
 - Minimum 2 similar corrections to form a pattern
 
 ### 3. Delegation Learning (`delegation_preference`)
 How should subagent prompts be written?
-- Aggregate all `delegation_learning` entries
-- Identify common prompt improvements
-- Extract rules for specific agent types (Explore, Bash, etc.)
+- Analyze `delegates` entries in trajectories
+- Look for patterns where delegation was corrected or refined
+- Extract rules for specific agent types
 
 ### 4. Efficiency Frontier (`efficiency_hint`)
-Which task types are being done efficiently vs. inefficiently?
-- For each task_type, compare step counts of high vs low success_score Episodes
-- Identify unnecessarily long Episodes (many tools, low success)
-- Find patterns in efficient Episodes (what they skip)
+Which task types are done efficiently vs. inefficiently?
+- For each task_type, compare turn counts and fail counts
+- Identify unnecessarily long tasks (many tools, many failures)
+- Find patterns in efficient tasks (what they skip or do differently)
 
 ### 5. File Co-change (`file_cochange`)
-Which files consistently appear together in Episodes?
-- Analyze `files_touched` across Episodes
-- Find pairs/groups that co-occur in 3+ Episodes
-- Useful for: suggesting related files when one is edited
+Which files consistently appear together across tasks?
+- Analyze `files_touched` across task trajectories
+- Find pairs/groups that co-occur in 3+ tasks
+- Useful for suggesting related files when one is edited
 
 ## Instinct Output Format
 
@@ -90,9 +98,9 @@ Prefer functional patterns (pure functions, immutability) over class-based appro
 Use composition over inheritance.
 
 ## Evidence
-- Episode e9ad6812/0: corrected class UserService to functional
-- Episode f3bc9a10/2: corrected class-based component to hook
-- Episode a1234567/1: corrected OOP utility to pure functions
+- task-001 turn 3: corrected class UserService to functional
+- task-002 turn 7: corrected class-based component to hook
+- task-003 turn 1: corrected OOP utility to pure functions
 ```
 
 ## Instinct Update Rules
@@ -120,7 +128,7 @@ For instincts with `confidence >= 0.7`, also write materialization files to the 
 ### Rules (confidence >= 0.7)
 Write `{staging_dir}/_learned.md` with the full updated rules content:
 ```markdown
-# Learned Preferences (auto-generated by continual-learning-v3)
+# Learned Preferences (auto-generated by continual-learning)
 # Last updated: {ISO date}
 # Source: observer v3 pattern detection
 # Do not edit manually - changes will be overwritten by observer

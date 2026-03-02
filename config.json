@@ -1,9 +1,7 @@
 {
   "version": "3.0",
   "data": {
-    "turns_path": "~/.claude/continual-learning/data/turns.jsonl",
-    "max_file_size_mb": 10,
-    "archive_after_days": 30
+    "max_file_size_mb": 10
   },
   "tool_recording": {
     "default": {
@@ -23,12 +21,14 @@
   },
   "observer": {
     "interval_seconds": 600,
-    "model_episode": "haiku",
+    "model_episode": "sonnet",
     "model_pattern": "sonnet",
     "model_bash_pattern": "sonnet",
     "min_turns_to_analyze": 14,
     "min_episodes_for_patterns": 3,
-    "min_bash_events": 10
+    "min_bash_events": 10,
+    "min_dirty_tasks_for_stage3": 1,
+    "time_gap_minutes": 30
   },
   "instincts": {
     "min_confidence": 0.3,
@@ -44,9 +44,6 @@
     "cooldown_seconds": 5
   },
   "materialization": {
-    "rule_threshold": 0.7,
-    "rule_output": "~/.claude/rules/learned.md",
-    "prompt_template_dir": "~/.claude/continual-learning/prompts/",
-    "auto_materialize": false
+    "rule_threshold": 0.7
   }
 }
