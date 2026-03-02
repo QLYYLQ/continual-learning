@@ -1,0 +1,7 @@
+{
+  "name": "continual-learning",
+  "version": "3.0.0",
+  "description": "Automatic behavior observation and pattern learning for Claude Code",
+  "skills": ["./skills/"],
+  "agents": []
+}

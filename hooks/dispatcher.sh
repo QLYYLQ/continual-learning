@@ -25,7 +25,7 @@ EVENT_TYPE="${1:-}"
 
 CL_DIR="$HOME/.claude/continual-learning"
 HOOKS_DIR="$CL_DIR/hooks"
-HOOKS_CONFIG="$HOOKS_DIR/hooks.json"
+HOOKS_CONFIG="$HOOKS_DIR/routing.json"
 
 # Read stdin (hook payload from Claude Code)
 INPUT="$(cat)"

@@ -1,0 +1,18 @@
+{
+  "pre_tool": {
+    "*": ["record"],
+    "Bash": ["record", "intercept"]
+  },
+  "post_tool": {
+    "Bash": ["record"]
+  },
+  "user_prompt": {
+    "*": ["record"]
+  },
+  "tool_fail": {
+    "*": ["record"]
+  },
+  "stop": {
+    "*": ["record"]
+  }
+}

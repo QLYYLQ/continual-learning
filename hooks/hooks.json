@@ -1,18 +1,65 @@
 {
-  "pre_tool": {
-    "*": ["record"],
-    "Bash": ["record", "intercept"]
-  },
-  "post_tool": {
-    "Bash": ["record"]
-  },
-  "user_prompt": {
-    "*": ["record"]
-  },
-  "tool_fail": {
-    "*": ["record"]
-  },
-  "stop": {
-    "*": ["record"]
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/dispatcher.sh\" pre_tool"
+          }
+        ],
+        "description": "Record tool usage and intercept bash commands via learned instincts"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "tool == \"Bash\"",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/dispatcher.sh\" post_tool"
+          }
+        ],
+        "description": "Record bash command results for pattern analysis"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/dispatcher.sh\" user_prompt"
+          }
+        ],
+        "description": "Record user prompts for session segmentation"
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/dispatcher.sh\" tool_fail"
+          }
+        ],
+        "description": "Record tool failures for correction pattern detection"
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/dispatcher.sh\" stop"
+          }
+        ],
+        "description": "Record session stop events"
+      }
+    ]
   }
 }

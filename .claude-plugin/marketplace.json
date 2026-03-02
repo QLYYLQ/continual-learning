@@ -1,0 +1,32 @@
+{
+  "name": "continual-learning",
+  "owner": {
+    "name": "QLYYLQ",
+    "email": ""
+  },
+  "metadata": {
+    "description": "Automatic behavior observation and pattern learning for Claude Code"
+  },
+  "plugins": [
+    {
+      "name": "continual-learning",
+      "source": "./",
+      "description": "Records tool usage, segments sessions, classifies tasks via LLM, detects behavioral patterns, and generates instincts that intercept bash commands and materialize into system prompt rules.",
+      "license": "MIT",
+      "keywords": [
+        "observation",
+        "learning",
+        "hooks",
+        "instincts",
+        "bash-intercept"
+      ],
+      "category": "workflow",
+      "tags": [
+        "observation",
+        "learning",
+        "hooks",
+        "instincts"
+      ]
+    }
+  ]
+}
