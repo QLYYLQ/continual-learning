@@ -14,5 +14,11 @@
   },
   "stop": {
     "*": ["record"]
+  },
+  "subagent_start": {
+    "*": ["record"]
+  },
+  "subagent_stop": {
+    "*": ["record"]
   }
 }

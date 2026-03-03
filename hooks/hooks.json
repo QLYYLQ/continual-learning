@@ -58,7 +58,31 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/dispatcher.sh\" stop"
           }
         ],
-        "description": "Record session stop events"
+        "description": "Record session stop events with final response and transcript path"
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/dispatcher.sh\" subagent_start"
+          }
+        ],
+        "description": "Record subagent launch events"
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/dispatcher.sh\" subagent_stop"
+          }
+        ],
+        "description": "Record subagent completion events with response and transcript path"
       }
     ]
   }

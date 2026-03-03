@@ -57,7 +57,7 @@ TOKEN_RE = re.compile(r"[\w\u4e00-\u9fff\u3400-\u4dbf]+", re.UNICODE)
 
 
 def parse_jsonl(path: str) -> list[dict]:
-    """Read JSONL file, skip malformed lines."""
+    """Read JSONL file, skip malformed lines. Accepts v3 and v4 events."""
     events = []
     with open(path, "r") as f:
         for line_num, line in enumerate(f, 1):
@@ -66,7 +66,7 @@ def parse_jsonl(path: str) -> list[dict]:
                 continue
             try:
                 evt = json.loads(line)
-                if evt.get("v") == 3:
+                if evt.get("v") in (3, 4):
                     events.append(evt)
             except json.JSONDecodeError:
                 print(f"Warning: skipping malformed line {line_num}", file=sys.stderr)
@@ -102,6 +102,8 @@ def build_turns(session_events: list[dict]) -> list[dict]:
         delegates: list[dict] = []
         files_touched: set[str] = set()
         bash_commands: list[str] = []
+        subagent_starts: list[dict] = []
+        subagent_stops: list[dict] = []
 
         for evt in events:
             e_type = evt.get("e")
@@ -137,6 +139,22 @@ def build_turns(session_events: list[dict]) -> list[dict]:
                     if cmd:
                         bash_commands.append(cmd)
 
+            elif e_type == "agent_start":
+                subagent_starts.append({
+                    "agent": evt.get("agent", "?"),
+                    "agent_id": evt.get("agent_id", ""),
+                })
+
+            elif e_type == "agent_stop":
+                entry = {
+                    "agent": evt.get("agent", "?"),
+                    "agent_id": evt.get("agent_id", ""),
+                }
+                atp = evt.get("atp", "")
+                if atp:
+                    entry["agent_transcript_path"] = atp
+                subagent_stops.append(entry)
+
         # Calculate duration
         duration_ms = 0
         if events:
@@ -154,6 +172,10 @@ def build_turns(session_events: list[dict]) -> list[dict]:
         turn["bash_commands"] = bash_commands
         turn["fail_count"] = fail_count
         turn["duration_ms"] = duration_ms
+        if subagent_starts:
+            turn["subagent_starts"] = subagent_starts
+        if subagent_stops:
+            turn["subagent_stops"] = subagent_stops
 
         return turn
 
@@ -327,7 +349,15 @@ def build_session(sid: str, session_events: list[dict], time_gap_minutes: int) -
 
     has_stop = any(evt.get("e") == "stop" for evt in session_events)
 
-    return {
+    # Extract transcript_path from first event that has it
+    transcript_path = ""
+    for evt in session_events:
+        tp = evt.get("tp", "")
+        if tp:
+            transcript_path = tp
+            break
+
+    session = {
         "session_id": sid,
         "time_range": {"start": time_start, "end": time_end},
         "primary_cwd": primary_cwd,
@@ -338,6 +368,9 @@ def build_session(sid: str, session_events: list[dict], time_gap_minutes: int) -
         "signals": signals,
         "turns": turns,
     }
+    if transcript_path:
+        session["transcript_path"] = transcript_path
+    return session
 
 
 def segment(input_path: str, outdir: str, index_path: str, time_gap_minutes: int) -> dict:
@@ -382,7 +415,7 @@ def segment(input_path: str, outdir: str, index_path: str, time_gap_minutes: int
     total_turns = sum(s["turn_count"] for s in sessions)
     index_entries = []
     for s in sessions:
-        index_entries.append({
+        entry = {
             "sid": s["session_id"],
             "start": s["time_range"]["start"],
             "end": s["time_range"]["end"],
@@ -390,7 +423,11 @@ def segment(input_path: str, outdir: str, index_path: str, time_gap_minutes: int
             "turn_count": s["turn_count"],
             "event_count": s["event_count"],
             "has_stop": s["has_stop"],
-        })
+        }
+        tp = s.get("transcript_path", "")
+        if tp:
+            entry["transcript_path"] = tp
+        index_entries.append(entry)
 
     index = {
         "built_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),

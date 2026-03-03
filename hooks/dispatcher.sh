@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
-# Continuous Learning v3 - Unified Hook Dispatcher
+# Continuous Learning v4 - Unified Hook Dispatcher
 #
 # Single entry-point for ALL CL hooks. Routes events to sub-hooks
-# based on hooks.json configuration.
+# based on routing.json configuration.
 #
-# Usage (registered in ~/.claude/settings.json):
+# Uses a temporary file for stdin to avoid bash variable size limits
+# when passing large payloads to sub-hooks.
+#
+# Usage (registered in hooks.json):
 #   dispatcher.sh pre_tool       — PreToolUse hook
 #   dispatcher.sh post_tool      — PostToolUse hook
 #   dispatcher.sh user_prompt    — UserPromptSubmit hook
 #   dispatcher.sh tool_fail      — PostToolUseFailure hook
 #   dispatcher.sh stop           — Stop hook
+#   dispatcher.sh subagent_start — SubagentStart hook
+#   dispatcher.sh subagent_stop  — SubagentStop hook
 #
 # Sub-hooks:
-#   record    → record.sh (always exit 0, recording only)
+#   record    → record.py (always exit 0, recording only)
 #   intercept → intercept.py (may exit 2 to block Bash commands)
 
 set -euo pipefail
@@ -27,20 +32,22 @@ CL_DIR="$HOME/.claude/continual-learning"
 HOOKS_DIR="$CL_DIR/hooks"
 HOOKS_CONFIG="$HOOKS_DIR/routing.json"
 
-# Read stdin (hook payload from Claude Code)
-INPUT="$(cat)"
+# Read stdin to a temporary file to avoid bash variable size limits
+INPUT_FILE=$(mktemp)
+trap 'rm -f "$INPUT_FILE"' EXIT
+cat > "$INPUT_FILE"
 
 # Extract tool_name from JSON payload
-TOOL_NAME=$(echo "$INPUT" | python3 -c '
+TOOL_NAME=$(python3 -c '
 import json, sys
 try:
     d = json.loads(sys.stdin.read())
     print(d.get("tool_name", ""))
 except Exception:
     print("")
-' 2>/dev/null || echo "")
+' < "$INPUT_FILE" 2>/dev/null || echo "")
 
-# Determine which sub-hooks to run by reading hooks.json
+# Determine which sub-hooks to run by reading routing.json
 SUB_HOOKS=$(python3 -c '
 import json, sys
 
@@ -80,16 +87,18 @@ for h in sorted(hooks):
 print("\n".join(ordered))
 ' "$EVENT_TYPE" "$TOOL_NAME" "$HOOKS_CONFIG" 2>/dev/null || echo "record")
 
-# Map hook types to appropriate record.sh event names
+# Map hook types to appropriate record.py event names
 map_event_to_record_type() {
     local event="$1"
     case "$event" in
-        pre_tool)    echo "pre_tool" ;;
-        post_tool)   echo "bash_result" ;;
-        user_prompt) echo "user_prompt" ;;
-        tool_fail)   echo "tool_fail" ;;
-        stop)        echo "stop" ;;
-        *)           echo "$event" ;;
+        pre_tool)       echo "pre_tool" ;;
+        post_tool)      echo "bash_result" ;;
+        user_prompt)    echo "user_prompt" ;;
+        tool_fail)      echo "tool_fail" ;;
+        stop)           echo "stop" ;;
+        subagent_start) echo "subagent_start" ;;
+        subagent_stop)  echo "subagent_stop" ;;
+        *)              echo "$event" ;;
     esac
 }
 
@@ -104,12 +113,12 @@ while IFS= read -r hook; do
 
     case "$hook" in
         record)
-            # Run record.sh — always exit 0
-            echo "$INPUT" | "$HOOKS_DIR/record.sh" "$RECORD_TYPE" 2>/dev/null || true
+            # Run record.py — always exit 0
+            python3 "$HOOKS_DIR/record.py" "$RECORD_TYPE" < "$INPUT_FILE" 2>/dev/null || true
             ;;
         intercept)
             # Run intercept.py — may exit 2 to block
-            INTERCEPT_STDERR=$(echo "$INPUT" | python3 "$HOOKS_DIR/intercept.py" 2>&1 1>/dev/null) || {
+            INTERCEPT_STDERR=$(python3 "$HOOKS_DIR/intercept.py" < "$INPUT_FILE" 2>&1 1>/dev/null) || {
                 EXIT_CODE=$?
                 if [ "$EXIT_CODE" -eq 2 ]; then
                     FINAL_EXIT=2

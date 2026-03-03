@@ -16,11 +16,13 @@
 #   │   ├── .stage2_retry_count  # Stage 2 failure retry counter
 #   │   └── .observer.pid        # Daemon PID file
 #   ├── cache/                   # Intermediate artifacts (rebuildable)
-#   │   ├── stage2_manifest.json
-#   │   ├── stage2_ops.json
-#   │   ├── stage2_prompt
-#   │   ├── stage2_raw_output
+#   │   ├── stage2a/             # Per-session summary files
+#   │   ├── stage2a_manifest.json
+#   │   ├── stage2a_ops.json
+#   │   ├── stage2b_candidates.json
+#   │   ├── stage2b_ops.json
 #   │   ├── stage3_bundle.json
+#   │   ├── stage3_enriched_bundle.json
 #   │   ├── stage3_raw_output
 #   │   ├── stage3b_prompt
 #   │   ├── stage3b_raw_output
@@ -68,7 +70,7 @@ BATCH_START_TIME=""
 BATCH_END_TIME=""
 
 # Ensure directory structure exists
-mkdir -p "$STATE_DIR" "$CACHE_DIR" "$LOG_DIR" "$SESSIONS_DIR" "$CL_DIR/prompts" "$CL_DIR/instincts/personal"
+mkdir -p "$STATE_DIR" "$CACHE_DIR" "$LOG_DIR" "$SESSIONS_DIR" "$CL_DIR/prompts" "$CL_DIR/instincts/personal" "$CL_DIR/instincts/scripts"
 
 # Load config
 read_config() {
@@ -103,6 +105,30 @@ log() {
     else
         echo "$msg" | tee -a "$LOG_FILE"
     fi
+}
+
+# Extract JSON object from LLM raw output
+# Usage: extract_json <raw_file> <output_file>
+extract_json() {
+    local raw_file="$1"
+    local output_file="$2"
+    python3 -c "
+import sys, json
+text = sys.stdin.read()
+start = text.find('{')
+end = text.rfind('}')
+if start >= 0 and end > start:
+    candidate = text[start:end+1]
+    try:
+        obj = json.loads(candidate)
+        print(json.dumps(obj, indent=2, ensure_ascii=False))
+    except json.JSONDecodeError:
+        print('INVALID_JSON', file=sys.stderr)
+        sys.exit(1)
+else:
+    print('NO_JSON_FOUND', file=sys.stderr)
+    sys.exit(1)
+" < "$raw_file" > "$output_file"
 }
 
 log_pipe() {
@@ -155,6 +181,26 @@ apply_staging_dir() {
         log "  [$stage_name] Updated prompt: $agent_name"
     done
 
+    # Move scripts to instincts/scripts/
+    local scripts_moved=0
+    if [ -d "$staging_dir/scripts" ]; then
+        for f in "$staging_dir/scripts"/*.sh "$staging_dir/scripts"/*.py; do
+            [ -f "$f" ] || continue
+            local script_basename
+            script_basename=$(basename "$f")
+            cp "$f" "$CL_DIR/instincts/scripts/$script_basename"
+            chmod +x "$CL_DIR/instincts/scripts/$script_basename"
+            scripts_moved=$((scripts_moved + 1))
+        done
+        log "  [$stage_name] Moved $scripts_moved scripts to instincts/scripts/"
+    fi
+
+    # Move _scripts.md to rules/
+    if [ -f "$staging_dir/_scripts.md" ]; then
+        cp "$staging_dir/_scripts.md" "$HOME/.claude/rules/scripts.md"
+        log "  [$stage_name] Updated scripts.md"
+    fi
+
     # Sync bash_insights.md if any bash_pattern instincts exist
     if ls "$staging_dir"/bash_pattern_*.yaml 1>/dev/null 2>&1 || \
        ls "$CL_DIR/instincts/personal"/bash_pattern_*.yaml 1>/dev/null 2>&1; then
@@ -164,7 +210,7 @@ apply_staging_dir() {
     # Clean up staging dir
     rm -rf "$staging_dir"
 
-    log "  [$stage_name] Staged files applied: $moved moved, $deleted deleted"
+    log "  [$stage_name] Staged files applied: $moved moved, $deleted deleted, $scripts_moved scripts"
 }
 
 # Run one analysis cycle
@@ -221,7 +267,7 @@ except Exception:
         return 0
     fi
 
-    # ── Stage 2: Task classification (LLM) ──
+    # ── Stage 2: Two-stage task classification (LLM) ──
     local stage2_succeeded=0
 
     # Build time filter args
@@ -233,15 +279,17 @@ except Exception:
         time_args="$time_args --end-time $BATCH_END_TIME"
     fi
 
-    # Step 2a: Prepare manifest
-    local manifest="$CACHE_DIR/stage2_manifest.json"
+    # ── Stage 2a: Intra-session task segmentation ──
+    local stage2a_dir="$CACHE_DIR/stage2a"
+    mkdir -p "$stage2a_dir"
+    local stage2a_manifest="$CACHE_DIR/stage2a_manifest.json"
     local prepare_output
-    prepare_output=$(python3 "$OBSERVER_DIR/prepare_stage2.py" \
+    prepare_output=$(python3 "$OBSERVER_DIR/prepare_stage2a.py" \
         --index "$INDEX" \
         --cursor "$CURSOR" \
-        --registry "$REGISTRY" \
         --sessions-dir "$SESSIONS_DIR" \
-        --manifest "$manifest" \
+        --output-dir "$stage2a_dir" \
+        --manifest "$stage2a_manifest" \
         $time_args 2>>"$LOG_FILE") || true
 
     local new_count
@@ -251,57 +299,80 @@ except Exception:
         log "Stage 2: No new sessions to classify"
         stage2_succeeded=1
     else
-        log "Stage 2: Classifying $new_count sessions into tasks with $MODEL_TASK..."
+        log "Stage 2a: Segmenting $new_count sessions with $MODEL_TASK..."
 
-        # Step 2b: Build prompt with manifest path
-        local stage2_prompt_file="$CACHE_DIR/stage2_prompt"
+        # Build Stage 2a prompt
+        local stage2a_prompt_file="$CACHE_DIR/stage2a_prompt"
         {
-            cat "$OBSERVER_DIR/task_prompt.md"
+            cat "$OBSERVER_DIR/stage2a_prompt.md"
             echo ""
-            echo "Manifest file: $manifest"
-        } > "$stage2_prompt_file"
+            echo "Manifest file: $stage2a_manifest"
+        } > "$stage2a_prompt_file"
 
-        # Step 2c: Run LLM
-        local stage2_raw="$CACHE_DIR/stage2_raw_output"
-        cat "$stage2_prompt_file" | CL_OBSERVER=1 CLAUDECODE= claude --model "$MODEL_TASK" --print \
+        # Run Stage 2a LLM
+        local stage2a_raw="$CACHE_DIR/stage2a_raw_output"
+        cat "$stage2a_prompt_file" | CL_OBSERVER=1 CLAUDECODE= claude --model "$MODEL_TASK" --print \
             --allowedTools "Read" \
-            >"$stage2_raw" 2>"$LOG_DIR/stage2_stderr"
+            >"$stage2a_raw" 2>"$LOG_DIR/stage2a_stderr"
 
-        if [ -s "$stage2_raw" ]; then
-            # Step 2d: Extract JSON operations from LLM output
-            local ops_file="$CACHE_DIR/stage2_ops.json"
-            if python3 -c "
-import sys, json
-text = sys.stdin.read()
-start = text.find('{')
-end = text.rfind('}')
-if start >= 0 and end > start:
-    candidate = text[start:end+1]
-    try:
-        obj = json.loads(candidate)
-        print(json.dumps(obj, indent=2, ensure_ascii=False))
-    except json.JSONDecodeError:
-        print('INVALID_JSON', file=sys.stderr)
-        sys.exit(1)
-else:
-    print('NO_JSON_FOUND', file=sys.stderr)
-    sys.exit(1)
-" < "$stage2_raw" > "$ops_file" 2>>"$LOG_DIR/stage2_stderr"; then
-                # Step 2e: Apply operations to task registry
-                python3 "$OBSERVER_DIR/apply_stage2.py" \
-                    --ops "$ops_file" \
+        local stage2a_ok=0
+        if [ -s "$stage2a_raw" ]; then
+            local stage2a_ops="$CACHE_DIR/stage2a_ops.json"
+            if extract_json "$stage2a_raw" "$stage2a_ops" 2>>"$LOG_DIR/stage2a_stderr"; then
+                # Apply Stage 2a: build candidate tasks
+                local candidates_file="$CACHE_DIR/stage2b_candidates.json"
+                python3 "$OBSERVER_DIR/apply_stage2a.py" \
+                    --ops "$stage2a_ops" \
                     --registry "$REGISTRY" \
-                    --cursor "$CURSOR" \
-                    --manifest "$manifest" 2>>"$LOG_FILE"
-
-                log "Stage 2 complete"
-                stage2_succeeded=1
+                    --manifest "$stage2a_manifest" \
+                    --output "$candidates_file" 2>>"$LOG_FILE"
+                stage2a_ok=1
+                log "Stage 2a complete"
             else
-                log "ERROR: Stage 2 - failed to extract valid JSON from LLM output"
+                log "ERROR: Stage 2a - failed to extract valid JSON from LLM output"
             fi
         else
-            log "ERROR: Stage 2 - no output from LLM"
-            cat "$LOG_DIR/stage2_stderr" >> "$LOG_FILE" 2>/dev/null
+            log "ERROR: Stage 2a - no output from LLM"
+            cat "$LOG_DIR/stage2a_stderr" >> "$LOG_FILE" 2>/dev/null
+        fi
+
+        # ── Stage 2b: Cross-session merging ──
+        if [ "$stage2a_ok" -eq 1 ]; then
+            log "Stage 2b: Merging/associating candidates with $MODEL_TASK..."
+
+            local stage2b_prompt_file="$CACHE_DIR/stage2b_prompt"
+            {
+                cat "$OBSERVER_DIR/stage2b_prompt.md"
+                echo ""
+                echo "Candidates file: $candidates_file"
+            } > "$stage2b_prompt_file"
+
+            local stage2b_raw="$CACHE_DIR/stage2b_raw_output"
+            cat "$stage2b_prompt_file" | CL_OBSERVER=1 CLAUDECODE= claude --model "$MODEL_TASK" --print \
+                --allowedTools "Read" \
+                >"$stage2b_raw" 2>"$LOG_DIR/stage2b_stderr"
+
+            if [ -s "$stage2b_raw" ]; then
+                local stage2b_ops="$CACHE_DIR/stage2b_ops.json"
+                if extract_json "$stage2b_raw" "$stage2b_ops" 2>>"$LOG_DIR/stage2b_stderr"; then
+                    # Apply Stage 2b: write to task registry
+                    python3 "$OBSERVER_DIR/apply_stage2b.py" \
+                        --ops "$stage2b_ops" \
+                        --candidates "$candidates_file" \
+                        --registry "$REGISTRY" \
+                        --cursor "$CURSOR" \
+                        --sessions-dir "$SESSIONS_DIR" \
+                        --manifest "$stage2a_manifest" 2>>"$LOG_FILE"
+
+                    log "Stage 2b complete"
+                    stage2_succeeded=1
+                else
+                    log "ERROR: Stage 2b - failed to extract valid JSON from LLM output"
+                fi
+            else
+                log "ERROR: Stage 2b - no output from LLM"
+                cat "$LOG_DIR/stage2b_stderr" >> "$LOG_FILE" 2>/dev/null
+            fi
         fi
     fi
 
@@ -329,13 +400,27 @@ else:
             log "Stage 3: Analyzing $dirty_count dirty tasks with $MODEL_PATTERN..."
             mkdir -p "$CL_DIR/instincts/personal"
 
+            # Enrich trajectories with transcript data (optional step)
+            local enriched_bundle="$CACHE_DIR/stage3_enriched_bundle.json"
+            local use_bundle="$bundle"
+            if python3 "$OBSERVER_DIR/enrich_trajectories.py" \
+                --bundle "$bundle" \
+                --sessions-dir "$SESSIONS_DIR" \
+                --output "$enriched_bundle" \
+                --config "$CONFIG" 2>>"$LOG_FILE"; then
+                use_bundle="$enriched_bundle"
+                log "  Stage 3: Enriched trajectories with transcript data"
+            else
+                log "  Stage 3: Enrichment skipped (using basic bundle)"
+            fi
+
             local staging_dir
             staging_dir=$(mktemp -d "/tmp/cl_stage3_XXXXXX")
 
             local stage3_prompt
             stage3_prompt="$(cat "$OBSERVER_DIR/task_analysis_prompt.md")
 
-Task bundle file: $bundle
+Task bundle file: $use_bundle
 Existing instincts directory: $CL_DIR/instincts/personal/
 Staging directory (write all output files here): $staging_dir/"
 
