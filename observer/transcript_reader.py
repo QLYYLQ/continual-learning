@@ -36,8 +36,13 @@ def read_transcript(path: str, max_size_mb: float = 2.0) -> list[dict]:
                 if not line:
                     continue
                 try:
-                    msg = json.loads(line)
-                    messages.append(msg)
+                    entry = json.loads(line)
+                    # Claude Code transcripts wrap messages in a top-level
+                    # object with keys like type, message, uuid, etc.
+                    # Extract the inner message dict if present.
+                    msg = entry.get("message", entry) if isinstance(entry, dict) else entry
+                    if isinstance(msg, dict) and msg.get("role"):
+                        messages.append(msg)
                 except json.JSONDecodeError:
                     continue
     except (OSError, PermissionError):
