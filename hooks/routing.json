@@ -13,7 +13,7 @@
     "*": ["record"]
   },
   "stop": {
-    "*": ["record"]
+    "*": ["record", "trigger"]
   },
   "subagent_start": {
     "*": ["record"]

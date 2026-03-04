@@ -51,5 +51,26 @@
   },
   "materialization": {
     "rule_threshold": 0.7
+  },
+  "pipeline": {
+    "stage1": {
+      "trigger": { "type": "on_hook", "event": "Stop" },
+      "script": "segment_sessions.py"
+    },
+    "stage2": {
+      "trigger": { "type": "after_stage", "stage": "stage1", "count": 3 },
+      "guard": { "min_turns": 14 },
+      "script": "stage2_runner"
+    },
+    "stage3": {
+      "trigger": { "type": "after_stage", "stage": "stage2", "count": 1 },
+      "guard": { "min_dirty_tasks": 1 },
+      "script": "stage3_runner"
+    },
+    "stage3b": {
+      "trigger": { "type": "after_stage", "stage": "stage2", "count": 1 },
+      "guard": { "min_bash_events": 10 },
+      "script": "stage3b_runner"
+    }
   }
 }

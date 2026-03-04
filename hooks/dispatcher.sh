@@ -126,6 +126,13 @@ while IFS= read -r hook; do
                 fi
             }
             ;;
+        trigger)
+            # Run trigger evaluator — may run Stage 1 and queue downstream stages
+            # Map event type to capitalized form matching config (stop -> Stop)
+            local trigger_event
+            trigger_event="$(echo "${EVENT_TYPE:0:1}" | tr '[:lower:]' '[:upper:]')${EVENT_TYPE:1}"
+            python3 "$HOOKS_DIR/trigger_evaluator.py" on_hook "$trigger_event" 2>>"$CL_DIR/data/log/trigger.log" || true
+            ;;
         *)
             # Unknown sub-hook, skip
             ;;
